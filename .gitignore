@@ -1,0 +1,14 @@
+.venv/
+.venv311/
+.github/
+data/
+docs/
+literature/
+models/
+nc_analysis/
+old_scripts_data/
+reefcheck/
+viz/
+wandb/
+Scripts/Labels/Belt.csv
+Scripts/Analysis/coral-bleaching-detector-master/__pycache__/
