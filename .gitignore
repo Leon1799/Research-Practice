@@ -11,4 +11,6 @@ reefcheck/
 viz/
 wandb/
 Scripts/Labels/Belt.csv
+Scripts/Labels/testlabels.parquet
+Scripts/Labels/testregions.parquet
 Scripts/Analysis/coral-bleaching-detector-master/__pycache__/

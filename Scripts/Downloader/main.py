@@ -119,11 +119,11 @@ def download(site):
   tmp_path.rename(out_path)
   print(f'{site.region_name}: Done.')
 
-
+# change to testregions.parquet if local code development
 def main():
   import sys
   _, offset, mod = sys.argv
-  regions = pd.read_parquet(r'./Scripts/Labels/regions.parquet')########################
+  regions = pd.read_parquet(r'./Scripts/Labels/regions.parquet')
   regions['region_name'] = regions.Site_ID.apply(lambda x: f'SID_{x}')
   regions = [r for r in regions.itertuples() if not (ROOT / 'nc' / f'{r.region_name}.nc').exists()]
   regions = regions[int(offset)::int(mod)]

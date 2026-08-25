@@ -2,7 +2,7 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 from typing import cast
 
-MAX_DATA_WORKERS = 3 #####################################
+MAX_DATA_WORKERS = 3 # limit due to server limitations
 
 def train_data():
   ds = cast(
@@ -11,8 +11,8 @@ def train_data():
   )
   ds = ds.shuffle(10_000) 
   ds = ds.batch(1024) #batchsize
-  ds = ds.map(prepare_sample, num_parallel_calls=MAX_DATA_WORKERS)################
-  ds = ds.map(augment, num_parallel_calls=MAX_DATA_WORKERS)##################
+  ds = ds.map(prepare_sample, num_parallel_calls=MAX_DATA_WORKERS)
+  ds = ds.map(augment, num_parallel_calls=MAX_DATA_WORKERS)
   return ds
 
 
@@ -27,6 +27,24 @@ def val_data(yield_dicts=False):
   else:
     ds = ds.map(prepare_sample)
   return ds
+
+
+# if running code with reduced 12 site dataset (during code development) no test split is available
+if 'test' in tfds.builder('corals').info.splits:
+  def test_data(yield_dicts=False):
+    ds = cast(
+      tf.data.Dataset,
+      tfds.load('corals', split='test')
+    )
+    ds = ds.batch(1024)
+    if yield_dicts:
+      ds = ds.map(prepare_sample_dicts)
+    else:
+      ds = ds.map(prepare_sample)
+    return ds
+else:
+  globals().pop('test_data', None)
+
 
 
 def augment(timeseries, label):
