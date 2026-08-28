@@ -28,6 +28,11 @@ import corals  # pyright: ignore[reportMissingImports]
 ###################
 
 def main():
+  # tune multiplier
+  global BLEACHING_WEIGHT_MULTIPLIER
+  if len(sys.argv) > 1:
+    BLEACHING_WEIGHT_MULTIPLIER = float(sys.argv[1])
+
   # Setup a very simple model
   # model = Sequential([
   #   #               time,bands
@@ -72,11 +77,21 @@ def nan_mask(y_true, y_pred):
   return y_true, y_pred
 
 
-# Custom BCE loss function that ignores NaNs
+BLEACHING_WEIGHT_MULTIPLIER = 5.0
+
+
+# Custom BCE loss function that ignores NaNs and upweights higher-bleaching examples (heuristically scaling weights)
 def bce(y_true, y_pred):
-  y_true, y_pred = nan_mask(y_true, y_pred) # y_true are scaled bleaching fractions and y_pred sigmoid output
-  bce = BinaryCrossentropy()
-  return bce(y_true, y_pred)
+  y_true, y_pred = nan_mask(y_true, y_pred) # y_true are scaled bleaching fractions and y_pred sigmoid output, flattens to 1D
+
+  # apply multiplication before bce averages individual losses
+  y_true_elementwise = tf.expand_dims(y_true, axis=-1) # preserve 1 bce value per label, so weights can be applied to correct labels
+  y_pred_elementwise = tf.expand_dims(y_pred, axis=-1)
+  bce_per_element = BinaryCrossentropy(reduction='none')(y_true_elementwise, y_pred_elementwise)
+
+  # higher true bleaching fraction -> higher loss weight, since those examples are rare
+  weights = 1.0 + BLEACHING_WEIGHT_MULTIPLIER * y_true
+  return tf.reduce_mean(bce_per_element * weights)
 
 
 # Custom metric for accuracy within 10% threshold, ignoring NaNs
@@ -87,6 +102,34 @@ def accuracy_at_10(y_true, y_pred):
   positive_predicted = y_pred > 0.1
   correct_predictions = positive_true == positive_predicted
   return tf.reduce_mean(tf.cast(correct_predictions, tf.float32))
+
+
+# validation metrics
+def calculate_metrics(labels, preds, prefix, threshold=0.1):
+  valid = ~np.isnan(labels)
+  y_true = labels[valid]
+  y_pred = preds[valid]
+
+  error = y_pred - y_true
+  positive_true = y_true >= threshold
+  positive_pred = y_pred >= threshold
+
+  true_positives = np.sum(positive_true & positive_pred)
+  false_positives = np.sum(~positive_true & positive_pred)
+  false_negatives = np.sum(positive_true & ~positive_pred)
+
+  # guard against division by zero when a split has no (predicted) positives
+  precision = true_positives / max(true_positives + false_positives, 1)
+  recall = true_positives / max(true_positives + false_negatives, 1)
+
+  return {
+    f'{prefix}_valid_label_count': int(len(y_true)), # pixel level count of validation labels
+    f'{prefix}_bleaching_positive_count': int(np.sum(positive_true)), #pixel level count of >10% bleaching labels
+    f'{prefix}_masked_mae_percent': float(100 * np.mean(np.abs(error))),
+    f'{prefix}_masked_bias_percent': float(100 * np.mean(error)),
+    f'{prefix}_bleaching_precision_at_10': float(precision),
+    f'{prefix}_bleaching_recall_at_10': float(recall),
+  }
 
 
 class VisualizationCallback(keras.callbacks.Callback):
@@ -101,6 +144,10 @@ class VisualizationCallback(keras.callbacks.Callback):
       preds.append(self.model(batch['satellite']).numpy()[..., 0])
       labels.append(batch['label'].numpy()[..., 0])
     sites, labels, preds = map(np.concatenate, (sites, labels, preds))
+
+    # pixel-level metrics
+    if logs is not None:
+      logs.update(calculate_metrics(labels, preds, prefix='val')) # pyright: ignore[reportAttributeAccessIssue]
 
     fig, ax = plt.subplots(figsize=(5, 5))
     mask = ~np.isnan(labels)
@@ -134,6 +181,11 @@ class VisualizationCallback(keras.callbacks.Callback):
       map(np.concatenate, (agg_labels, agg_means, agg_p25s, agg_p75s))
     p50s = (p25s + p75s) / 2
     ranges = (p75s - p25s) / 2
+
+    # site-level metrics: pixel predictions averaged per site/quarter first, so large sites don't dominate
+    if logs is not None:
+      site_metrics = calculate_metrics(labels, means, prefix='val_site')
+      logs['val_site_masked_mae_percent'] = site_metrics['val_site_masked_mae_percent'] # pyright: ignore[reportIndexIssue]
 
     fig, ax = plt.subplots(figsize=(5, 5))
     mask = ~np.isnan(labels)
