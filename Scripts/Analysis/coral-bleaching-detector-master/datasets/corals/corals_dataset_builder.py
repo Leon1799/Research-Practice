@@ -18,13 +18,14 @@ USE_SPATIAL_SPLIT = True
 class Builder(tfds.core.GeneratorBasedBuilder):
   """DatasetBuilder for corals dataset."""
 
-  VERSION = tfds.core.Version('1.0.4')
+  VERSION = tfds.core.Version('1.0.5')
   RELEASE_NOTES = {
       '1.0.0': 'gentle-serenity-17, Local, (12 sites)',
       '1.0.1': 'worthy-wood-18, Server, (12 sites)',
       '1.0.2': 'elated-shadow-19, Local, (new splitting) (12 sites)',
-      '1.0.3': 'magic-yogurt-20, Server, (new splitting) (500 sites)',
-      '1.0.4': '?, Server, (weighted loss, metrics) (all sites)',
+      '1.0.3': 'magic-yogurt-20, helpful-glitter, Server, (new splitting) (500 sites)',
+      '1.0.4': 'iconic-snow, fragrant-breeze, golden-salad, Server, (weighted loss, metrics) (all sites)',
+      '1.0.5': '?, Server, (all sites (excluded 1 labeled quarter sites))',
   }
 
   def _info(self) -> tfds.core.DatasetInfo:
