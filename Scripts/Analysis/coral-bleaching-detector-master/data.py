@@ -1,8 +1,13 @@
 import tensorflow as tf
 import tensorflow_datasets as tfds
 from typing import cast
+from pathlib import Path
+import numpy as np
+import pandas as pd
 
 MAX_DATA_WORKERS = 3 # limit due to server limitations
+
+NUM_CLASSES = 4
 
 def train_data():
   ds = cast(
@@ -48,29 +53,54 @@ else:
 
 
 def augment(timeseries, label):
-  t0 = tf.random.uniform([], 0, 98-66, dtype=tf.int32)
-  timeseries = timeseries[:, t0:t0+66]
-  label = label[:, t0:t0+66]
-  # Add random gaussian noise
-  # timeseries = timeseries + 0.2 * tf.random.normal(tf.shape(timeseries))
+  #t0 = tf.random.uniform([], 0, 98-66, dtype=tf.int32)
+  #timeseries = timeseries[:, t0:t0+66]
+  #label = label[:, t0:t0+66]
   return timeseries, label
 
 
 def prepare_sample(sample):
   ts = sample['satellite']
-  # Assumption 1: All labels are given in percent, so divide them by 100 to get [0-1] values
-  label = sample['label'] / 100
-  # Alternative (Bold) Assumption 2: All values below 1 are meant as fractions while
-  # values above 1 are given as percent values
-  # label = tf.where(label > 1, label / 100, label) # Scale % to [0-1]
+  label = sample['label']
   return ts, label
 
 
 def prepare_sample_dicts(sample):
   sample = dict(**sample)
-  sample['label'] = sample['label'] / 100
-  # Alternative (Bold) Assumption 2: All values below 1 are meant as fractions while
-  # values above 1 are given as percent values
-  # label = tf.where(label > 1, label / 100, label) # Scale % to [0-1]
   return sample
+
+
+
+# inverse frequency class weights
+def class_weights():
+    train_dataset = tfds.load("corals", split="train")
+    counts = np.zeros(NUM_CLASSES, dtype=np.int64)
+
+    for sample in tfds.as_numpy(train_dataset):
+        values = np.asarray(sample["label"]).reshape(-1) # convert label to 1dim np array (98,)
+
+        #drop NAN quarters
+        values = values[np.isfinite(values)]
+
+        values = values.astype(np.int64)
+
+        # Count occurrences of classes 
+        counts += np.bincount(
+            values,
+            minlength=NUM_CLASSES,
+        )
+
+    present = counts > 0
+
+    weights = np.ones(NUM_CLASSES, dtype=np.float32)
+
+    weights[present] = (
+        counts[present].sum()
+        / (present.sum() * counts[present])
+    )
+
+    print("Training class counts:", counts)
+    print("Training class weights:", weights)
+
+    return weights
 

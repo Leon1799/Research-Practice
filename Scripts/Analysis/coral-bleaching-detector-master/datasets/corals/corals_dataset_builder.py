@@ -18,14 +18,16 @@ USE_SPATIAL_SPLIT = True
 class Builder(tfds.core.GeneratorBasedBuilder):
   """DatasetBuilder for corals dataset."""
 
-  VERSION = tfds.core.Version('1.0.5')
+  VERSION = tfds.core.Version('2.0.1')
   RELEASE_NOTES = {
       '1.0.0': 'gentle-serenity-17, Local, (12 sites)',
       '1.0.1': 'worthy-wood-18, Server, (12 sites)',
       '1.0.2': 'elated-shadow-19, Local, (new splitting) (12 sites)',
       '1.0.3': 'magic-yogurt-20, helpful-glitter, Server, (new splitting) (500 sites)',
       '1.0.4': 'iconic-snow, fragrant-breeze, golden-salad, Server, (weighted loss, metrics) (all sites)',
-      '1.0.5': '?, Server, (all sites (excluded 1 labeled quarter sites))',
+      '1.0.5': 'gallant-hill-26, Server, (all sites (excluded 1 labeled quarter sites))',
+      '2.0.0': 'polar-sea-30, Local, (pixel-level corn classification, (12 sites))',
+      '2.0.1': '?, Server, (weighted pixel-level corn classification, (all sites))'
   }
 
   def _info(self) -> tfds.core.DatasetInfo:
@@ -51,8 +53,8 @@ class Builder(tfds.core.GeneratorBasedBuilder):
       return self._split_generators_spatial(labels)
 
     labels = pd.read_parquet(r'./Scripts/Labels/testlabels.parquet')
-    train = labels[~labels.index.str.endswith('f')]
-    val = labels[labels.index.str.endswith('f')]
+    train = labels[~labels.index.str.endswith('8')]
+    val = labels[labels.index.str.endswith('8')]
 
     print(f'Train: {len(train)}')
     print(f'Val: {len(val)}')

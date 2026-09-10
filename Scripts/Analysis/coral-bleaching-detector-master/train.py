@@ -1,202 +1,274 @@
-##############
 # added the dataset to the path so that it can be imported
 import sys 
 from pathlib import Path
 from typing import Any, cast
-############
-
 import tensorflow_datasets as tfds
 import numpy as np
-from data import train_data, val_data  # pyright: ignore[reportAttributeAccessIssue]
+from data import train_data, val_data, class_weights  # pyright: ignore[reportAttributeAccessIssue]
+try:
+  from data import test_data  # pyright: ignore[reportAttributeAccessIssue]
+except ImportError:
+  test_data = None # if running on 12 site test files
 from unet1d import UNet1D
 import wandb
 from wandb.integration.keras import WandbMetricsLogger
 wandb.require("core")
 import tensorflow as tf
 from tensorflow import keras # pyright: ignore[reportMissingModuleSource]
-from tensorflow.keras.losses import BinaryCrossentropy # pyright: ignore[reportMissingModuleSource]
-from tensorflow.keras.models import Sequential # pyright: ignore[reportMissingModuleSource]
-from tensorflow.keras.layers import Conv1D, InputLayer, Dropout, BatchNormalization, Activation # pyright: ignore[reportMissingModuleSource]
-from tensorflow.keras.optimizers import Adam, AdamW # pyright: ignore[reportMissingModuleSource]
+from tensorflow.keras.optimizers import Adam # pyright: ignore[reportMissingModuleSource]
+import coral_ordinal as coral # included specific github commit (see requirements) to have corn included and required tensorflow/python version for this project
+
 import matplotlib.pyplot as plt
 
-######################
 # added the dataset to the path so that it can be imported 
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_DIR / "datasets"))
 import corals  # pyright: ignore[reportMissingImports]
-###################
 
-def main():
-  # tune multiplier
-  global BLEACHING_WEIGHT_MULTIPLIER
-  if len(sys.argv) > 1:
-    BLEACHING_WEIGHT_MULTIPLIER = float(sys.argv[1])
 
-  # Setup a very simple model
-  # model = Sequential([
-  #   #               time,bands
-  #   InputLayer(shape=(98, 4)),
-  #   Conv1D(256, kernel_size=3, padding='same'),
-  #   BatchNormalization(),
-  #   Activation('relu'),
-  #   Conv1D(256, kernel_size=3, padding='same'),
-  #   BatchNormalization(),
-  #   Activation('relu'),
-  #   Conv1D(256, kernel_size=3, padding='same'),
-  #   BatchNormalization(),
-  #   Activation('relu'),
-  #   Conv1D( 1, kernel_size=1, padding='same', activation='sigmoid'),  # Output layer
-  # ])
-  model = UNet1D(
-      input_shape=(98, 4),
-      num_classes=1,
-      filters=64
+NUM_CLASSES = 4
+CLASS_WEIGHTS = tf.constant(class_weights(), dtype=tf.float32) # Store for efficient indexing of class weights during loss computation
+
+
+# CORN logits to class labels 
+def decode_corn_logits(logits):
+    cumulative_probs = coral.corn_cumprobs(logits) # cumulative probabilities for each class (product of conditional probabilities: probabilities between 0 and 1 derived from logits)
+    return coral.cumprobs_to_label(
+        cumulative_probs,
+        threshold=0.5,
+    ) # if > 0.5 assign to class
+
+
+# Flatten labels and logits and ignore NAN in loss
+# satellite: [B,98,4bands], labels: [B,98,1], logits: [B,98,3]
+def flatten_and_mask(y_true, y_pred):
+  y_true = tf.squeeze(y_true, axis=-1) # remove last dimension to get shape [B,98]
+  y_true_flat = tf.reshape(y_true, [-1]) # reshape to [B*98]
+  y_pred_flat = tf.reshape(y_pred, [-1, NUM_CLASSES - 1]) #reshape to [B*98, 3] for CORN logits
+
+  # exclude NaN
+  valid_mask = tf.math.logical_not(tf.math.is_nan(y_true_flat))
+  y_true_valid = tf.boolean_mask(y_true_flat, valid_mask)
+  y_pred_valid = tf.boolean_mask(y_pred_flat, valid_mask)
+
+  y_true_valid = tf.cast(y_true_valid, tf.int32)
+
+  return y_true_valid, y_pred_valid
+
+
+# copied and adapted CornOrdinalCrossEntropy from Github to include class weights and masking:
+def weighted_corn_loss(y_true, y_pred):
+    
+    y_pred = tf.convert_to_tensor(y_pred, dtype=tf.float32)
+
+    y_true_valid, y_pred_valid = flatten_and_mask(y_true, y_pred) #remove NAN
+
+    weights = tf.gather(CLASS_WEIGHTS, y_true_valid) # inverse freq weights
+
+    sets = []
+
+    for i in range(NUM_CLASSES - 1):
+        set_mask = y_true_valid > i - 1
+        label_gt_i = y_true_valid > i
+        sets.append((set_mask, label_gt_i))
+
+    losses = tf.zeros((), dtype=y_pred.dtype)
+    # removed n_examples from original because of graph error
+
+    for task_index, s in enumerate(sets):
+        set_mask, label_gt_i = s
+
+        pred_task = tf.gather(y_pred_valid, task_index, axis=1)
+        losses_task = tf.where(
+            set_mask,
+            tf.where(
+                label_gt_i,
+                tf.math.log_sigmoid(pred_task),
+                tf.math.log_sigmoid(pred_task) - pred_task,
+            ),
+            0.0,
+        )
+
+        # Apply class weight BEFORE reducing over samples.
+        weighted_losses_task = losses_task * weights
+
+        losses += -tf.reduce_sum(weighted_losses_task)
+
+    return losses / NUM_CLASSES
+
+
+# Runs the model over every batch in a dataset and sums one confusion matrix across all of them
+def accumulate_confusion_matrix(model, dataset):
+  confusion_matrix = np.zeros((NUM_CLASSES, NUM_CLASSES), dtype=np.int64)
+
+  for satellite, label in dataset:
+    logits = model(satellite)  # [B, 98, 3]
+    true_classes, valid_logits = flatten_and_mask(label, logits)
+    predicted_classes = decode_corn_logits(valid_logits)  
+    batch_matrix = tf.math.confusion_matrix(
+        true_classes, predicted_classes, num_classes=NUM_CLASSES
+    ).numpy()
+    confusion_matrix += batch_matrix
+
+  return confusion_matrix
+
+
+# confusion matrix -> metrics (per epoch)
+def confusion_matrix_metrics(confusion_matrix, prefix):
+  true_positives = np.diag(confusion_matrix) 
+  predicted_positives = confusion_matrix.sum(axis=0)  # (column sums)
+  actual_positives = confusion_matrix.sum(axis=1)  # (row sums)
+
+  
+  precision_per_class = np.divide(
+      true_positives, predicted_positives,
+      out=np.zeros_like(true_positives, dtype=np.float64), where=predicted_positives > 0,
+  )# if pred positives is 0 -> precision is 0
+
+  recall_per_class = np.divide(
+      true_positives, actual_positives,
+      out=np.zeros_like(true_positives, dtype=np.float64), where=actual_positives > 0,
   )
 
-  wandb.init(project='Corals')
-  run = cast(Any, wandb.run)#########
-  print(f'models/{run.id}.keras')########
+  f1_per_class = np.divide(
+      2 * precision_per_class * recall_per_class,
+      precision_per_class + recall_per_class,
+      out=np.zeros_like(precision_per_class, dtype=np.float64),
+      where=precision_per_class + recall_per_class > 0,
+  )
 
-  # Initialize a new W&B run
-  model.compile(
-      optimizer=Adam(),
-      loss=bce,
-      metrics=[accuracy_at_10])
-  model.fit(train_data(),
-            epochs=20,
-            validation_data=val_data(), callbacks=[VisualizationCallback(), WandbMetricsLogger()])
-  model.save(f'models/{run.id}.keras')################### #models dir must exist already
+  total_count = confusion_matrix.sum()
+  accuracy = float(true_positives.sum() / total_count) if total_count > 0 else 0.0
 
 
-# Filter out nan values from the timeseries
-def nan_mask(y_true, y_pred):
-  mask = tf.math.logical_not(tf.math.is_nan(y_true))
-  y_true = tf.boolean_mask(y_true, mask)
-  y_pred = tf.boolean_mask(y_pred, mask)
-  return y_true, y_pred
-
-
-BLEACHING_WEIGHT_MULTIPLIER = 5.0
-
-
-# Custom BCE loss function that ignores NaNs and upweights higher-bleaching examples (heuristically scaling weights)
-def bce(y_true, y_pred):
-  y_true, y_pred = nan_mask(y_true, y_pred) # y_true are scaled bleaching fractions and y_pred sigmoid output, flattens to 1D
-
-  # apply multiplication before bce averages individual losses
-  y_true_elementwise = tf.expand_dims(y_true, axis=-1) # preserve 1 bce value per label, so weights can be applied to correct labels
-  y_pred_elementwise = tf.expand_dims(y_pred, axis=-1)
-  bce_per_element = BinaryCrossentropy(reduction='none')(y_true_elementwise, y_pred_elementwise)
-
-  # higher true bleaching fraction -> higher loss weight, since those examples are rare
-  weights = 1.0 + BLEACHING_WEIGHT_MULTIPLIER * y_true
-  return tf.reduce_mean(bce_per_element * weights)
-
-
-# Custom metric for accuracy within 10% threshold, ignoring NaNs
-def accuracy_at_10(y_true, y_pred):
-  y_true, y_pred = nan_mask(y_true, y_pred)
-  # Threshold at 0.1 to get arbitrary "bleached" and "non-bleached" classes
-  positive_true = y_true > 0.1
-  positive_predicted = y_pred > 0.1
-  correct_predictions = positive_true == positive_predicted
-  return tf.reduce_mean(tf.cast(correct_predictions, tf.float32))
-
-
-# validation metrics
-def calculate_metrics(labels, preds, prefix, threshold=0.1):
-  valid = ~np.isnan(labels)
-  y_true = labels[valid]
-  y_pred = preds[valid]
-
-  error = y_pred - y_true
-  positive_true = y_true >= threshold
-  positive_pred = y_pred >= threshold
-
-  true_positives = np.sum(positive_true & positive_pred)
-  false_positives = np.sum(~positive_true & positive_pred)
-  false_negatives = np.sum(positive_true & ~positive_pred)
-
-  # guard against division by zero when a split has no (predicted) positives
-  precision = true_positives / max(true_positives + false_positives, 1)
-  recall = true_positives / max(true_positives + false_negatives, 1)
+  class_ids = np.arange(NUM_CLASSES)
+  true_class_grid, predicted_class_grid = np.meshgrid(class_ids, class_ids, indexing='ij') 
+  absolute_class_errors = np.abs(true_class_grid - predicted_class_grid) # distance matrix for class errors
+  mae = float((confusion_matrix * absolute_class_errors).sum() / total_count) if total_count > 0 else 0.0 # sum of all class-distance errors / number of valid labels
 
   return {
-    f'{prefix}_valid_label_count': int(len(y_true)), # pixel level count of validation labels
-    f'{prefix}_bleaching_positive_count': int(np.sum(positive_true)), #pixel level count of >10% bleaching labels
-    f'{prefix}_masked_mae_percent': float(100 * np.mean(np.abs(error))),
-    f'{prefix}_masked_bias_percent': float(100 * np.mean(error)),
-    f'{prefix}_bleaching_precision_at_10': float(precision),
-    f'{prefix}_bleaching_recall_at_10': float(recall),
-  }
+    f'{prefix}_valid_label_count': int(total_count),
+    f'{prefix}_ordinal_accuracy': accuracy,
+    f'{prefix}_ordinal_mae': mae,
+    f'{prefix}_macro_precision': float(precision_per_class.mean()),
+    f'{prefix}_macro_recall': float(recall_per_class.mean()),
+    f'{prefix}_macro_f1': float(f1_per_class.mean()),
+  } #mean because average over all classes
+
+# plot confmatrix (normalized)
+def confusion_matrix_to_figure(confusion_matrix, title):
+  row_totals = confusion_matrix.sum(axis=1, keepdims=True)
+
+  normalized_matrix = np.divide(
+    confusion_matrix,
+    row_totals,
+    out=np.zeros_like(confusion_matrix, dtype=np.float64),
+    where=row_totals != 0,
+  )
+
+  fig, ax = plt.subplots(figsize=(6, 5))
+  image = ax.imshow(
+    normalized_matrix,
+    cmap='Blues',
+    vmin=0,
+    vmax=1,
+  )
+  fig.colorbar(image, ax=ax, label='Proportion')
+
+  ax.set_title(title)
+  ax.set_xlabel('Predicted class')
+  ax.set_ylabel('True class')
+  ax.set_xticks(np.arange(NUM_CLASSES))
+  ax.set_yticks(np.arange(NUM_CLASSES))
+
+  for true_class in range(NUM_CLASSES):
+    for predicted_class in range(NUM_CLASSES):
+      ax.text(
+        predicted_class,
+        true_class,
+        f'{normalized_matrix[true_class, predicted_class]:.1%}',
+        ha='center',
+        va='center',
+        color='black',
+      )
+
+  fig.tight_layout()
+  return fig
 
 
-class VisualizationCallback(keras.callbacks.Callback):
-  def __init__(self, ):
+#creates val set, called after every epoch and calls accumulate_confusion_matrix, logs metrics
+class ConfusionMatrixCallback(keras.callbacks.Callback):
+  def __init__(self, run):
     super().__init__()
-    self.ds = val_data(yield_dicts=True)
+    self.run = run
+    self.val_ds = val_data()  # (satellite, label) batches
+    self.last_confusion_matrix = None  # final validation result
 
   def on_epoch_end(self, epoch, logs=None):
-    preds, sites, labels = [], [], []
-    for batch in self.ds:
-      sites.append(batch['site'].numpy())
-      preds.append(self.model(batch['satellite']).numpy()[..., 0])
-      labels.append(batch['label'].numpy()[..., 0])
-    sites, labels, preds = map(np.concatenate, (sites, labels, preds))
-
-    # pixel-level metrics
+    self.last_confusion_matrix = accumulate_confusion_matrix(self.model, self.val_ds)
+    figure = confusion_matrix_to_figure(
+      self.last_confusion_matrix,
+      title=f'Validation confusion matrix - epoch {epoch + 1}',
+    )
+    self.run.log({'val_confusion_matrix': wandb.Image(figure)}, step=epoch + 1)
+    plt.close(figure)
     if logs is not None:
-      logs.update(calculate_metrics(labels, preds, prefix='val')) # pyright: ignore[reportAttributeAccessIssue]
+      logs.update(confusion_matrix_metrics(self.last_confusion_matrix, prefix='val')) # pyright: ignore[reportAttributeAccessIssue]
 
-    fig, ax = plt.subplots(figsize=(5, 5))
-    mask = ~np.isnan(labels)
-    ax.scatter(labels[mask], preds[mask])
-    ax.plot([0, 1], [0, 1], '--', c='gray')
-    ax.set_aspect(True)
-    ax.set_xlabel('True Bleaching [%]')
-    ax.set_ylabel('Predicted Bleaching [%]')
-    wandb.log({'scatter': wandb.Image(fig)}, step=epoch)
-    plt.close(fig)
 
-    agg_labels = []
-    agg_means = []
-    agg_p25s = []
-    agg_p75s = []
-    for site in np.unique(sites):
-      mask = sites == site
-      label = labels[mask][0]
-      nanmask = ~np.isnan(label)
-      label = label[nanmask]
-      pred = preds[mask][:, nanmask]
-      mean = pred.mean(axis=0)
-      p25, p75 = np.percentile(pred, [10, 90], axis=0)
 
-      agg_labels.append(label)
-      agg_means.append(mean)
-      agg_p25s.append(p25)
-      agg_p75s.append(p75)
 
-    labels, means, p25s, p75s = \
-      map(np.concatenate, (agg_labels, agg_means, agg_p25s, agg_p75s))
-    p50s = (p25s + p75s) / 2
-    ranges = (p75s - p25s) / 2
+def main():
 
-    # site-level metrics: pixel predictions averaged per site/quarter first, so large sites don't dominate
-    if logs is not None:
-      site_metrics = calculate_metrics(labels, means, prefix='val_site')
-      logs['val_site_masked_mae_percent'] = site_metrics['val_site_masked_mae_percent'] # pyright: ignore[reportIndexIssue]
+  model = UNet1D(
+      input_shape=(98, 4),
+      num_classes=NUM_CLASSES - 1,
+      final_activation="linear",
+      filters=64
+  )
+  # 4 classes require 3 ordinal thresholds
+  # corn requires raw logits, therefore no sigmoid activation function
 
-    fig, ax = plt.subplots(figsize=(5, 5))
-    mask = ~np.isnan(labels)
-    ax.scatter(labels, means)
-    ax.errorbar(labels, p50s, fmt='none', yerr=ranges)
-    ax.plot([0, 1], [0, 1], '--', c='gray')
-    ax.set_aspect(True)
-    ax.set_xlabel('True Bleaching [%]')
-    ax.set_ylabel('Predicted Bleaching [%]')
-    wandb.log({'site-means': wandb.Image(fig)}, step=epoch)
-    plt.close(fig)
+  wandb.init(project='Corals')
+  run = cast(Any, wandb.run)
+  print(f'models/{run.id}.keras')
+
+  model.compile(
+      optimizer=Adam(),
+      loss=weighted_corn_loss
+  )
+  
+  confusion_callback = ConfusionMatrixCallback(run)
+  
+  # Fit with only the callback for validation
+  model.fit(
+      train_data(),
+      epochs=20,
+      validation_data=val_data(),
+      callbacks=[confusion_callback, WandbMetricsLogger()],
+  )
+  model.save(f'models/{run.id}.keras')
+
+  # use test set for final evaluation if available, otherwise use last validation matrix
+  if test_data is not None:
+    final_confusion_matrix = accumulate_confusion_matrix(model, test_data())
+    final_prefix = 'test'
+  else:
+    final_confusion_matrix = confusion_callback.last_confusion_matrix
+    final_prefix = 'val_final'
+  
+  final_metrics = confusion_matrix_metrics(final_confusion_matrix, prefix=final_prefix)
+  print(f'Final metrics ({final_prefix}):')
+  print(final_metrics)
+  run.summary.update(final_metrics)
+
+  final_confusion_figure = confusion_matrix_to_figure(
+    final_confusion_matrix,
+    title=f'Final confusion matrix - {final_prefix}',
+  )
+  run.log({'final_confusion_matrix': wandb.Image(final_confusion_figure)})
+  plt.close(final_confusion_figure)
+
 
 
 
