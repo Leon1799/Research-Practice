@@ -7,6 +7,7 @@ WORKDIR /home/leon
 # Install cuDNN 9 required by TensorFlow (tensorflow docker image contained cuDNN 8 instead)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+        git \
         libcudnn9-cuda-12 \
         libcudnn9-dev-cuda-12 && \
     rm -rf /var/lib/apt/lists/*
