@@ -25,9 +25,14 @@ PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_DIR / "datasets"))
 import corals  # pyright: ignore[reportMissingImports]
 
+USE_CLASS_WEIGHTS = False #for unweighted comparison
 
 NUM_CLASSES = 4
-CLASS_WEIGHTS = tf.constant(class_weights(), dtype=tf.float32) # Store for efficient indexing of class weights during loss computation
+CLASS_WEIGHTS = (
+    tf.constant(class_weights(), dtype=tf.float32)
+    if USE_CLASS_WEIGHTS
+    else tf.ones(NUM_CLASSES, dtype=tf.float32)
+) # Store for efficient indexing of class weights during loss computation
 
 
 # CORN logits to class labels 
