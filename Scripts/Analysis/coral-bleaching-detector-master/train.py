@@ -15,6 +15,7 @@ from wandb.integration.keras import WandbMetricsLogger
 wandb.require("core")
 import tensorflow as tf
 from tensorflow import keras # pyright: ignore[reportMissingModuleSource]
+from tensorflow.keras.callbacks import ModelCheckpoint # type: ignore
 from tensorflow.keras.optimizers import Adam # pyright: ignore[reportMissingModuleSource]
 import coral_ordinal as coral # included specific github commit (see requirements) to have corn included and required tensorflow/python version for this project
 
@@ -25,7 +26,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_DIR / "datasets"))
 import corals  # pyright: ignore[reportMissingImports]
 
-USE_CLASS_WEIGHTS = False #for unweighted comparison
+USE_CLASS_WEIGHTS = "--no-class-weights" not in sys.argv[1:] #for unweighted comparison
 
 NUM_CLASSES = 4
 CLASS_WEIGHTS = (
@@ -68,15 +69,16 @@ def weighted_corn_loss(y_true, y_pred):
 
     y_true_valid, y_pred_valid = flatten_and_mask(y_true, y_pred) #remove NAN
 
-    weights = tf.gather(CLASS_WEIGHTS, y_true_valid) # inverse freq weights
+    weights = tf.gather(CLASS_WEIGHTS, y_true_valid) # inverse freq weights (every sample gets its class weight)
 
     sets = []
 
     for i in range(NUM_CLASSES - 1):
-        set_mask = y_true_valid > i - 1
+        set_mask = y_true_valid > i - 1 # tells which samples participate in current CORN threshold
         label_gt_i = y_true_valid > i
         sets.append((set_mask, label_gt_i))
 
+    normalizer = tf.zeros((), dtype=y_pred.dtype)
     losses = tf.zeros((), dtype=y_pred.dtype)
     # removed n_examples from original because of graph error
 
@@ -94,12 +96,19 @@ def weighted_corn_loss(y_true, y_pred):
             0.0,
         )
 
-        # Apply class weight BEFORE reducing over samples.
-        weighted_losses_task = losses_task * weights
+        # Apply class weight BEFORE reducing over samples (like github)
 
-        losses += -tf.reduce_sum(weighted_losses_task)
+        # added because loss wasnt normalized correctly, previously loss was divided by fixed NUM_CLASSES         
+        active_weights = tf.where(
+            set_mask,
+            weights,
+            tf.zeros_like(weights),
+        )# =weights of samples participating in current CORN
 
-    return losses / NUM_CLASSES
+        losses -= tf.reduce_sum(losses_task * weights) # multiply by weights and take positive sum because contains negative
+        normalizer += tf.reduce_sum(active_weights)
+
+    return tf.math.divide_no_nan(losses, normalizer)
 
 
 # Runs the model over every batch in a dataset and sums one confusion matrix across all of them
@@ -158,6 +167,14 @@ def confusion_matrix_metrics(confusion_matrix, prefix):
     f'{prefix}_macro_precision': float(precision_per_class.mean()),
     f'{prefix}_macro_recall': float(recall_per_class.mean()),
     f'{prefix}_macro_f1': float(f1_per_class.mean()),
+    **{
+      f'{prefix}_class_{class_id}_precision': float(precision_per_class[class_id])
+      for class_id in range(NUM_CLASSES)
+    },
+    **{
+      f'{prefix}_class_{class_id}_recall': float(recall_per_class[class_id])
+      for class_id in range(NUM_CLASSES)
+    },
   } #mean because average over all classes
 
 # plot confmatrix (normalized)
@@ -211,14 +228,21 @@ class ConfusionMatrixCallback(keras.callbacks.Callback):
 
   def on_epoch_end(self, epoch, logs=None):
     self.last_confusion_matrix = accumulate_confusion_matrix(self.model, self.val_ds)
+    epoch_metrics = confusion_matrix_metrics(self.last_confusion_matrix, prefix='val') 
     figure = confusion_matrix_to_figure(
       self.last_confusion_matrix,
       title=f'Validation confusion matrix - epoch {epoch + 1}',
     )
-    self.run.log({'val_confusion_matrix': wandb.Image(figure)}, step=epoch + 1)
+    self.run.log(
+      {
+        'val_confusion_matrix': wandb.Image(figure),
+        **epoch_metrics,
+      },
+      step=epoch + 1,
+    )
     plt.close(figure)
     if logs is not None:
-      logs.update(confusion_matrix_metrics(self.last_confusion_matrix, prefix='val')) # pyright: ignore[reportAttributeAccessIssue]
+      logs.update(epoch_metrics) # pyright: ignore[reportAttributeAccessIssue]
 
 
 
@@ -236,7 +260,8 @@ def main():
 
   wandb.init(project='Corals')
   run = cast(Any, wandb.run)
-  print(f'models/{run.id}.keras')
+  checkpoint_path = f'models/{run.id}.keras'
+  print(checkpoint_path)
 
   model.compile(
       optimizer=Adam(),
@@ -244,22 +269,29 @@ def main():
   )
   
   confusion_callback = ConfusionMatrixCallback(run)
+  checkpoint_callback = ModelCheckpoint(
+      checkpoint_path,
+      monitor='val_macro_f1',
+      mode='max',
+      save_best_only=True,
+      save_weights_only=False,
+  )
   
   # Fit with only the callback for validation
   model.fit(
       train_data(),
       epochs=20,
       validation_data=val_data(),
-      callbacks=[confusion_callback, WandbMetricsLogger()],
+      callbacks=[confusion_callback, checkpoint_callback, WandbMetricsLogger()],
   )
-  model.save(f'models/{run.id}.keras')
+  model = keras.models.load_model(checkpoint_path, compile=False)
 
   # use test set for final evaluation if available, otherwise use last validation matrix
   if test_data is not None:
     final_confusion_matrix = accumulate_confusion_matrix(model, test_data())
     final_prefix = 'test'
   else:
-    final_confusion_matrix = confusion_callback.last_confusion_matrix
+    final_confusion_matrix = accumulate_confusion_matrix(model, val_data())
     final_prefix = 'val_final'
   
   final_metrics = confusion_matrix_metrics(final_confusion_matrix, prefix=final_prefix)

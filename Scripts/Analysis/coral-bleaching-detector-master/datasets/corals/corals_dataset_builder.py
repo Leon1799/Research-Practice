@@ -18,16 +18,17 @@ USE_SPATIAL_SPLIT = True
 class Builder(tfds.core.GeneratorBasedBuilder):
   """DatasetBuilder for corals dataset."""
 
-  VERSION = tfds.core.Version('2.0.1')
+  VERSION = tfds.core.Version('2.0.2')
   RELEASE_NOTES = {
-      '1.0.0': 'gentle-serenity-17, Local, (12 sites)',
-      '1.0.1': 'worthy-wood-18, Server, (12 sites)',
-      '1.0.2': 'elated-shadow-19, Local, (new splitting) (12 sites)',
-      '1.0.3': 'magic-yogurt-20, helpful-glitter, Server, (new splitting) (500 sites)',
-      '1.0.4': 'iconic-snow, fragrant-breeze, golden-salad, Server, (weighted loss, metrics) (all sites)',
-      '1.0.5': 'gallant-hill-26, Server, (all sites (excluded 1 labeled quarter sites))',
-      '2.0.0': 'polar-sea-30, Local, (pixel-level corn classification, (12 sites))',
-      '2.0.1': '?, Server, (weighted pixel-level corn classification, (all sites))'
+      '1.0.0': 'Local, 12 sites with bleaching threshold',
+      '1.0.1': 'Server, 12 sites with bleaching threshold',
+      '1.0.2': 'Local, 12 sites with bleaching threshold, spatial splitting',
+      '1.0.3': 'Server, spatial splitting, 500 sites',
+      '1.0.4': 'Server, all Indo-Pacific sites',
+      '1.0.5': 'Server, all Indo-Pacific sites without 1 labeled quarter sites',
+      '2.0.0': 'Local, 12 sites with no threshold and new class labels',
+      '2.0.1': 'Server, all Indo-Pacific sites, class labels',
+      '2.0.2': 'Server, all Indo-Pacific sites, spatial split balanced on 4 classes'
   }
 
   def _info(self) -> tfds.core.DatasetInfo:
