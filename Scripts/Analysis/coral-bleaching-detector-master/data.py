@@ -9,12 +9,13 @@ MAX_DATA_WORKERS = 3 # limit due to server limitations
 
 NUM_CLASSES = 4
 
-def train_data():
+# seed so that examples appear in same shuffled order
+def train_data(seed):
   ds = cast(
     tf.data.Dataset,
-    tfds.load('corals', split='train', shuffle_files=True)
+    tfds.load('corals', split='train', shuffle_files=True, read_config=tfds.ReadConfig(shuffle_seed=seed))
   )
-  ds = ds.shuffle(10_000) 
+  ds = ds.shuffle(10_000, seed=seed, reshuffle_each_iteration=True) 
   ds = ds.batch(1024) #batchsize
   ds = ds.map(prepare_sample, num_parallel_calls=MAX_DATA_WORKERS)
   ds = ds.map(augment, num_parallel_calls=MAX_DATA_WORKERS)
@@ -71,7 +72,7 @@ def prepare_sample_dicts(sample):
 
 
 
-# inverse frequency class weights
+# inverse frequency (sqrt) class weights
 def class_weights():
     train_dataset = tfds.load("corals", split="train")
     counts = np.zeros(NUM_CLASSES, dtype=np.int64)
@@ -94,10 +95,8 @@ def class_weights():
 
     weights = np.ones(NUM_CLASSES, dtype=np.float32)
 
-    weights[present] = (
-        counts[present].sum()
-        / (present.sum() * counts[present])
-    )
+    inverse_sqrt = 1.0 / np.sqrt(counts[present].astype(np.float32))
+    weights[present] = inverse_sqrt / inverse_sqrt.mean()
 
     print("Training class counts:", counts)
     print("Training class weights:", weights)

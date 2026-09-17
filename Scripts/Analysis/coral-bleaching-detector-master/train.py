@@ -2,8 +2,15 @@
 import sys 
 from pathlib import Path
 from typing import Any, cast
-import tensorflow_datasets as tfds
 import numpy as np
+import tensorflow as tf
+
+SEED = 42 # add seed for reproducibility
+
+tf.keras.utils.set_random_seed(SEED) #seed model initialization and tf randomness
+tf.config.experimental.enable_op_determinism() #deterministic GPU execution (check if train runs slower)
+
+import tensorflow_datasets as tfds
 from data import train_data, val_data, class_weights  # pyright: ignore[reportAttributeAccessIssue]
 try:
   from data import test_data  # pyright: ignore[reportAttributeAccessIssue]
@@ -13,7 +20,6 @@ from unet1d import UNet1D
 import wandb
 from wandb.integration.keras import WandbMetricsLogger
 wandb.require("core")
-import tensorflow as tf
 from tensorflow import keras # pyright: ignore[reportMissingModuleSource]
 from tensorflow.keras.callbacks import ModelCheckpoint # type: ignore
 from tensorflow.keras.optimizers import Adam # pyright: ignore[reportMissingModuleSource]
@@ -43,6 +49,12 @@ def decode_corn_logits(logits):
         cumulative_probs,
         threshold=0.5,
     ) # if > 0.5 assign to class
+
+
+# CORN logits to the probability that the sample belongs to class 2 or 3 (implemented for PR-AUC for >10% bleaching)
+def bleaching_positive_probability(logits):
+  cumulative_probs = coral.corn_cumprobs(logits) 
+  return cumulative_probs[:, 1] # threshold 1 = >class1
 
 
 # Flatten labels and logits and ignore NAN in loss
@@ -127,6 +139,22 @@ def accumulate_confusion_matrix(model, dataset):
   return confusion_matrix
 
 
+# PR-AUC for >10% bleaching
+def accumulate_bleaching_pr_auc(model, dataset):
+  pr_auc_metric = keras.metrics.AUC(curve='PR')
+
+  for satellite, label in dataset:
+    logits = model(satellite)  # [B, 98, 3]
+    true_classes, valid_logits = flatten_and_mask(label, logits)
+
+    bleaching_true = tf.cast(true_classes >= 2, tf.float32) # class 2 and 3 in groundtruth
+    bleaching_score = bleaching_positive_probability(valid_logits)
+
+    pr_auc_metric.update_state(bleaching_true, bleaching_score)
+
+  return float(pr_auc_metric.result().numpy())
+
+
 # confusion matrix -> metrics (per epoch)
 def confusion_matrix_metrics(confusion_matrix, prefix):
   true_positives = np.diag(confusion_matrix) 
@@ -151,6 +179,13 @@ def confusion_matrix_metrics(confusion_matrix, prefix):
       where=precision_per_class + recall_per_class > 0,
   )
 
+  f2_per_class = np.divide(
+      5 * precision_per_class * recall_per_class,
+      4 * precision_per_class + recall_per_class,
+      out=np.zeros_like(precision_per_class, dtype=np.float64),
+      where=4 * precision_per_class + recall_per_class > 0,
+  )
+
   total_count = confusion_matrix.sum()
   accuracy = float(true_positives.sum() / total_count) if total_count > 0 else 0.0
 
@@ -167,6 +202,7 @@ def confusion_matrix_metrics(confusion_matrix, prefix):
     f'{prefix}_macro_precision': float(precision_per_class.mean()),
     f'{prefix}_macro_recall': float(recall_per_class.mean()),
     f'{prefix}_macro_f1': float(f1_per_class.mean()),
+    f'{prefix}_macro_f2': float(f2_per_class.mean()),
     **{
       f'{prefix}_class_{class_id}_precision': float(precision_per_class[class_id])
       for class_id in range(NUM_CLASSES)
@@ -228,7 +264,9 @@ class ConfusionMatrixCallback(keras.callbacks.Callback):
 
   def on_epoch_end(self, epoch, logs=None):
     self.last_confusion_matrix = accumulate_confusion_matrix(self.model, self.val_ds)
+    val_bleaching_pr_auc = accumulate_bleaching_pr_auc(self.model, self.val_ds)
     epoch_metrics = confusion_matrix_metrics(self.last_confusion_matrix, prefix='val') 
+    epoch_metrics['val_bleaching_pr_auc_gt_10pct'] = val_bleaching_pr_auc
     figure = confusion_matrix_to_figure(
       self.last_confusion_matrix,
       title=f'Validation confusion matrix - epoch {epoch + 1}',
@@ -279,7 +317,7 @@ def main():
   
   # Fit with only the callback for validation
   model.fit(
-      train_data(),
+      train_data(seed=SEED),
       epochs=20,
       validation_data=val_data(),
       callbacks=[confusion_callback, checkpoint_callback, WandbMetricsLogger()],
@@ -289,12 +327,15 @@ def main():
   # use test set for final evaluation if available, otherwise use last validation matrix
   if test_data is not None:
     final_confusion_matrix = accumulate_confusion_matrix(model, test_data())
+    final_bleaching_pr_auc = accumulate_bleaching_pr_auc(model, test_data())
     final_prefix = 'test'
   else:
     final_confusion_matrix = accumulate_confusion_matrix(model, val_data())
+    final_bleaching_pr_auc = accumulate_bleaching_pr_auc(model, val_data())
     final_prefix = 'val_final'
   
   final_metrics = confusion_matrix_metrics(final_confusion_matrix, prefix=final_prefix)
+  final_metrics[f'{final_prefix}_bleaching_pr_auc_gt_10pct'] = final_bleaching_pr_auc
   print(f'Final metrics ({final_prefix}):')
   print(final_metrics)
   run.summary.update(final_metrics)
