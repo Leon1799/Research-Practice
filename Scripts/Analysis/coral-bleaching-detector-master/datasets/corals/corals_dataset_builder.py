@@ -18,7 +18,7 @@ USE_SPATIAL_SPLIT = True
 class Builder(tfds.core.GeneratorBasedBuilder):
   """DatasetBuilder for corals dataset."""
 
-  VERSION = tfds.core.Version('2.0.1')
+  VERSION = tfds.core.Version('2.0.2')
   RELEASE_NOTES = {
       '1.0.0': 'Local, 12 sites with bleaching threshold',
       '1.0.1': 'Server, 12 sites with bleaching threshold',
