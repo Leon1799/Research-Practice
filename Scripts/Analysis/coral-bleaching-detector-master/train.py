@@ -259,27 +259,32 @@ class ConfusionMatrixCallback(keras.callbacks.Callback):
   def __init__(self, run):
     super().__init__()
     self.run = run
+    self.train_ds = train_data(seed=SEED)
     self.val_ds = val_data()  # (satellite, label) batches
-    self.last_confusion_matrix = None  # final validation result
+    self.val_confusion_matrix = None  # final validation result
 
   def on_epoch_end(self, epoch, logs=None):
-    self.last_confusion_matrix = accumulate_confusion_matrix(self.model, self.val_ds)
+    self.train_confusion_matrix = accumulate_confusion_matrix(self.model, self.train_ds)
+    self.val_confusion_matrix = accumulate_confusion_matrix(self.model, self.val_ds)
     val_bleaching_pr_auc = accumulate_bleaching_pr_auc(self.model, self.val_ds)
-    epoch_metrics = confusion_matrix_metrics(self.last_confusion_matrix, prefix='val') 
+    train_metrics = confusion_matrix_metrics(self.train_confusion_matrix, prefix='train') 
+    epoch_metrics = confusion_matrix_metrics(self.val_confusion_matrix, prefix='val') 
     epoch_metrics['val_bleaching_pr_auc_gt_10pct'] = val_bleaching_pr_auc
     figure = confusion_matrix_to_figure(
-      self.last_confusion_matrix,
+      self.val_confusion_matrix,
       title=f'Validation confusion matrix - epoch {epoch + 1}',
     )
     self.run.log(
       {
         'val_confusion_matrix': wandb.Image(figure),
         **epoch_metrics,
+        **train_metrics
       },
       step=epoch + 1,
     )
     plt.close(figure)
     if logs is not None:
+      logs.update(train_metrics) # pyright: ignore[reportAttributeAccessIssue]
       logs.update(epoch_metrics) # pyright: ignore[reportAttributeAccessIssue]
 
 
