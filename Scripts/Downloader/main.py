@@ -19,18 +19,58 @@ catalog = pystac_client.Client.open(
     modifier=planetary_computer.sign_inplace,
 )
 
+S2_CLOUD_PROBABILITY_THRESHOLD = 30 #try out best threshold in Plotting_Canaries
+
+# mask SCL in gee
+def mask_s2(image):
+    scl = image.select('SCL')
+    cloud_probability = ee.Image(image.get('cloud_probability')).select('probability')
+
+    valid = (
+        scl.neq(1) # Saturated or defective
+        .And(scl.neq(2)) # Dark Area Pixels
+        .And(scl.neq(3)) # Cloud Shadows
+        .And(scl.neq(7)) # Clouds Low Probability 
+        .And(scl.neq(8)) # Clouds Medium Probability
+        .And(scl.neq(9)) # Clouds High Probability
+        .And(scl.neq(10)) # Cirrus
+        .And(scl.neq(11)) # Snow / Ice
+    )
+
+    valid = valid.And(cloud_probability.lt(S2_CLOUD_PROBABILITY_THRESHOLD))
+
+    return image.updateMask(valid)
+
 ee.Initialize(project='glassy-acolyte-480612-n3')
 ACA = ee.Image("ACA/reef_habitat/v2_0")
-ls8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2') \
-    .select(['SR_B2', 'SR_B3', 'SR_B4', 'ST_B10', 'QA_PIXEL']) \
-    .map(lambda img: img.rename(['blue', 'green', 'red', 'lwir', 'qa_pixel']))
-ls9 = ee.ImageCollection('LANDSAT/LC09/C02/T1_L2') \
-    .select(['SR_B2', 'SR_B3', 'SR_B4', 'ST_B10', 'QA_PIXEL']) \
-    .map(lambda img: img.rename(['blue', 'green', 'red', 'lwir', 'qa_pixel']))
-ls7 = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2') \
-    .select(['SR_B1', 'SR_B2', 'SR_B3', 'ST_B6', 'QA_PIXEL']) \
-    .map(lambda img: img.rename(['blue', 'green', 'red', 'lwir', 'qa_pixel']))
-landsat = ls8.merge(ls9).merge(ls7)
+
+sentinel = (
+    ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+    .filterDate('2017-04-01', '2026-08-01')
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 90)) # filter images with >90% cloud cover
+)
+
+cloud_probability = (
+    ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY')
+    .filterDate('2017-04-01', '2026-08-01')
+)
+
+joined = ee.Join.saveFirst('cloud_probability').apply(
+    primary=sentinel,
+    secondary=cloud_probability,
+    condition=ee.Filter.equals(
+        leftField='system:index',
+        rightField='system:index',
+    ),
+)
+
+sentinel = (
+    ee.ImageCollection(joined)
+    .filter(ee.Filter.notNull(['cloud_probability']))
+    .map(mask_s2)
+    .select(['B2', 'B3', 'B4', 'B8'])
+    .map(lambda img: img.rename(['blue', 'green', 'red', 'nir']))
+)
 
 ROOT = Path('./data')
 (ROOT / 'ACA').mkdir(exist_ok=True, parents=True)
@@ -48,39 +88,35 @@ def download(site):
   da = cubo.create(
     lat=site.lat, # Central latitude of the cube
     lon=site.lon, # Central longitude of the cube
-    collection=landsat, # Name of the STAC collection
-    bands=['blue', 'green', 'red', 'lwir', 'qa_pixel'], # Bands to retrieve
-    start_date="2000-01-01", # Start date of the cube
-    end_date="2024-12-31", # End date of the cube
+    collection=sentinel, # Name of the STAC collection
+    bands=['blue', 'green', 'red', 'nir'], # Bands to retrieve
+    start_date="2017-04-01", # Start date of the cube
+    end_date="2026-08-01", # End date of the cube
     edge_size=256, # Edge size of the cube (px)
-    resolution=30, # Pixel size of the cube (m)
+    resolution=10, # Pixel size of the cube (m)
     stackstac_kw=dict(
       dtype=np.uint16,
       rescale=False,
-      fill_value=0,
+      fill_value=0, 
     ),
     gee=True, # Set to True
-    query={"eo:cloud_cover": { "lt": 10 }} # kwarg to pass
+#    query={"eo:cloud_cover": { "lt": 10 }} # kwarg to pass
   )
 
-  da = da.fillna(0).astype(np.uint16)
+  da = da.fillna(0).astype(np.uint16) 
   ds = da.to_dataset(dim='band')
   del ds.attrs['collection']
 
   print(f'{site.region_name}: Valid data filtering')
-  # Filter valid acquisitions
-  bitmask = (1 << 3) | (1 << 1) | (1 << 4)
-  valid_mask = (ds.qa_pixel & bitmask) == 0
-  valid_times = valid_mask.mean(dim=['y', 'x']) > 0.1
-  with ProgressBar():
-    valid_times = valid_times.compute()
-  ds = ds.isel(time=valid_times)
 
+
+# sentinel pixel coordinates
   dx = float(ds.x[1] - ds.x[0])
   dy = float(ds.y[1] - ds.y[0])
   tx = float(ds.x[0])
   ty = float(ds.y[0])
 
+# ensure that ACA has same pixel grid as sentinel (10m)
   transform = [
       dx, 0, tx - dx/2,
       0, dy, ty - dy/2,
@@ -105,7 +141,7 @@ def download(site):
   aca = aca.rename_vars({1: 'geomorphic', 2: 'benthic', 3: 'reef_mask'})
 
   print(f'{site.region_name}: Merging Datasets')
-  assert np.all(aca.x.values == ds.x.values)
+  assert np.all(aca.x.values == ds.x.values) # verify that aca matches sentinel
   assert np.all(aca.y.values == ds.y.values)
   ds = ds.merge(aca)
 

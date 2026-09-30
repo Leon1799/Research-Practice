@@ -58,11 +58,11 @@ def bleaching_positive_probability(logits):
 
 
 # Flatten labels and logits and ignore NAN in loss
-# satellite: [B,98,4bands], labels: [B,98,1], logits: [B,98,3]
+# satellite: [B,38,4bands], labels: [B,38,1], logits: [B,38,3]
 def flatten_and_mask(y_true, y_pred):
-  y_true = tf.squeeze(y_true, axis=-1) # remove last dimension to get shape [B,98]
-  y_true_flat = tf.reshape(y_true, [-1]) # reshape to [B*98]
-  y_pred_flat = tf.reshape(y_pred, [-1, NUM_CLASSES - 1]) #reshape to [B*98, 3] for CORN logits
+  y_true = tf.squeeze(y_true, axis=-1) # remove last dimension to get shape [B,38]
+  y_true_flat = tf.reshape(y_true, [-1]) # reshape to [B*38]
+  y_pred_flat = tf.reshape(y_pred, [-1, NUM_CLASSES - 1]) #reshape to [B*38, 3] for CORN logits
 
   # exclude NaN
   valid_mask = tf.math.logical_not(tf.math.is_nan(y_true_flat))
@@ -128,7 +128,7 @@ def accumulate_confusion_matrix(model, dataset):
   confusion_matrix = np.zeros((NUM_CLASSES, NUM_CLASSES), dtype=np.int64)
 
   for satellite, label in dataset:
-    logits = model(satellite)  # [B, 98, 3]
+    logits = model(satellite)  # [B, 38, 3]
     true_classes, valid_logits = flatten_and_mask(label, logits)
     predicted_classes = decode_corn_logits(valid_logits)  
     batch_matrix = tf.math.confusion_matrix(
@@ -144,7 +144,7 @@ def accumulate_bleaching_pr_auc(model, dataset):
   pr_auc_metric = keras.metrics.AUC(curve='PR')
 
   for satellite, label in dataset:
-    logits = model(satellite)  # [B, 98, 3]
+    logits = model(satellite)  # [B, 38, 3]
     true_classes, valid_logits = flatten_and_mask(label, logits)
 
     bleaching_true = tf.cast(true_classes >= 2, tf.float32) # class 2 and 3 in groundtruth
@@ -293,7 +293,7 @@ class ConfusionMatrixCallback(keras.callbacks.Callback):
 def main():
 
   model = UNet1D(
-      input_shape=(98, 4),
+      input_shape=(38, 4),
       num_classes=NUM_CLASSES - 1,
       final_activation="linear",
       filters=64

@@ -2,10 +2,12 @@
 .venv311/
 .github/
 data/
+data_old/
 docs/
 literature/
 models/
 nc_analysis/
+nc_analysis_landsat/
 old_scripts_data/
 reefcheck/
 viz/
@@ -13,4 +15,7 @@ wandb/
 Scripts/Labels/Belt.csv
 Scripts/Labels/testlabels.parquet
 Scripts/Labels/testregions.parquet
+Scripts/Labels/sentinellabels.parquet
+Scripts/Labels/sentinellabels_percent.parquet
+Scripts/Labels/sentinelregions.parquet
 Scripts/Analysis/coral-bleaching-detector-master/__pycache__/

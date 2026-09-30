@@ -18,7 +18,7 @@ USE_SPATIAL_SPLIT = True
 class Builder(tfds.core.GeneratorBasedBuilder):
   """DatasetBuilder for corals dataset."""
 
-  VERSION = tfds.core.Version('2.0.4')
+  VERSION = tfds.core.Version('3.0.2')
   RELEASE_NOTES = {
       '1.0.0': 'Local, 12 sites with bleaching threshold',
       '1.0.1': 'Server, 12 sites with bleaching threshold',
@@ -30,7 +30,10 @@ class Builder(tfds.core.GeneratorBasedBuilder):
       '2.0.1': 'Server, all Indo-Pacific sites, class labels',
       '2.0.2': 'Server, all Indo-Pacific sites, spatial split balanced on 4 classes',
       '2.0.3': 'Server, all sites, spatial split balanced on 4 classes',
-      '2.0.4': 'Server, all sites, "", undersampled train set'
+      '2.0.4': 'Server, all sites, "", undersampled train set',
+      '3.0.0': 'Local, 12 sites, sentinel test',
+      '3.0.1': 'Local, 12 sites, sentinel test, cloud probability, outlier threshold',
+      '3.0.2': 'Server, all sites',
   }
 
   def _info(self) -> tfds.core.DatasetInfo:
@@ -38,9 +41,8 @@ class Builder(tfds.core.GeneratorBasedBuilder):
     # TODO(corals): Specifies the tfds.core.DatasetInfo object
     return self.dataset_info_from_configs(
         features=tfds.features.FeaturesDict({
-            # These are the features of your dataset like images, labels ...
-            'satellite': tfds.features.Tensor(shape=(98, 4), dtype=np.float32, encoding=tfds.features.Encoding.BYTES),
-            'label': tfds.features.Tensor(shape=(98, 1), dtype=np.float32, encoding=tfds.features.Encoding.BYTES),
+            'satellite': tfds.features.Tensor(shape=(38, 4), dtype=np.float32, encoding=tfds.features.Encoding.BYTES),
+            'label': tfds.features.Tensor(shape=(38, 1), dtype=np.float32, encoding=tfds.features.Encoding.BYTES),
             'site': tfds.features.Text(),
         }),
         supervised_keys=('satellite', 'label'),  # Set to `None` to disable
@@ -55,7 +57,7 @@ class Builder(tfds.core.GeneratorBasedBuilder):
       labels = pd.read_parquet(r'./Scripts/Labels/labels.parquet')
       return self._split_generators_spatial(labels)
 
-    labels = pd.read_parquet(r'./Scripts/Labels/testlabels.parquet')
+    labels = pd.read_parquet(r'./Scripts/Labels/sentinellabels.parquet')
     train = labels[~labels.index.str.endswith('8')]
     val = labels[labels.index.str.endswith('8')]
 
@@ -100,10 +102,10 @@ class Builder(tfds.core.GeneratorBasedBuilder):
       ts = xr.open_dataarray(ncpath, engine='h5netcdf')
 
       for idx, pix in ts.groupby('pixel', squeeze=False):
-        satellite = pix.squeeze('pixel').sel(band=['blue', 'green', 'red', 'lwir']).transpose('time', 'band') / 10_000
+        satellite = pix.squeeze('pixel').sel(band=['blue', 'green', 'red', 'nir']).transpose('time', 'band') / 10_000
         satellite = satellite.values.astype(np.float32)
         yield f'{site}_{idx}', {
           'satellite': satellite,
-          'label': label.values.astype(np.float32).reshape((98, 1)),
+          'label': label.values.astype(np.float32).reshape((38, 1)),
           'site': site,
         }

@@ -7,7 +7,10 @@ def UNet1D(input_shape, num_classes, final_activation='sigmoid',
            filters=64, dropout=0.1, kernel_size=3):
   inputs = Input(shape=input_shape)
 
-  init = layers.Conv1D(filters, 3)(inputs)
+  # Pad to a length that stays compatible with four downsampling steps.
+  padded_inputs = layers.ZeroPadding1D(padding=(0, 10))(inputs)
+
+  init = layers.Conv1D(filters, 3, padding='same')(padded_inputs)
 
   # Encoder
   c1 = conv_block(init, filters, kernel_size, dropout)
@@ -42,7 +45,8 @@ def UNet1D(input_shape, num_classes, final_activation='sigmoid',
   u9 = layers.concatenate([u9, c1])
   c9 = conv_block(u9, filters, kernel_size, dropout)
 
-  outputs = layers.Conv1DTranspose(num_classes, 3, activation=final_activation)(c9)
+  outputs = layers.Conv1DTranspose(num_classes, 3, padding='same', activation=final_activation)(c9)
+  outputs = layers.Cropping1D(cropping=(0, 10))(outputs)
 
   model = models.Model(inputs, outputs)
   return model
