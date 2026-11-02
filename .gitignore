@@ -19,3 +19,4 @@ Scripts/Labels/sentinellabels.parquet
 Scripts/Labels/sentinellabels_percent.parquet
 Scripts/Labels/sentinelregions.parquet
 Scripts/Analysis/coral-bleaching-detector-master/__pycache__/
+Scripts/Analysis/metrics comparison plots.ipynb
